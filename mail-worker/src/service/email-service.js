@@ -386,7 +386,7 @@ const emailService = {
 			}
 		};
 
-		// 全部站内收件人走本地投递；存在站外收件人时优先 CF，其次 Resend。
+		// 全部站内收件人走本地投递；存在站外收件人时优先 CF，免费版非验证收件人自动回落 Resend。
 		let deliveries;
 		if (allInternal) {
 			deliveries = this.sendInternal(c, context);
@@ -438,7 +438,10 @@ const emailService = {
 	},
 
 	// CF 发送：普通发送一次提交所有收件人，分开发送逐人调用并保存结果。
-	async *sendCloudflare(c, { separate, sendParams, saveParams }) {
+	// A+C 回落：免费版 CF 只发已验证收件人，非验证收件人报
+	// E_RECIPIENT_PLAN_RESTRICTED；此时若配了该域名的 Resend Token，
+	// 自动改走 Resend 发这组收件人，不直接报错。
+	async *sendCloudflare(c, { separate, sendParams, saveParams, resendToken }) {
 		const recipientGroups = separate
 			? sendParams.receiveEmail.map(address => [address])
 			: [sendParams.receiveEmail];
@@ -447,6 +450,17 @@ const emailService = {
 			try {
 				result = await this.sendByCloudflareEmail(c, { ...sendParams, receiveEmail });
 			} catch (error) {
+				const restricted = error?.code === 'E_RECIPIENT_PLAN_RESTRICTED'
+					|| String(error?.message || '').includes('E_RECIPIENT_PLAN_RESTRICTED');
+				if (restricted && resendToken) {
+					yield* this.sendResend(c, {
+						separate: false,
+						resendToken,
+						sendParams: { ...sendParams, receiveEmail },
+						saveParams: { ...saveParams, useCloudflareEmail: false }
+					});
+					continue;
+				}
 				if (!separate) throw error;
 				// 分开发送遇到渠道错误即停止，已成功的记录由入口汇总。
 				yield { error: { message: error.message } };
